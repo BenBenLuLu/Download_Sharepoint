@@ -1,6 +1,7 @@
 """
 URL Downloader
-讀取 URL_contactor.xlsx，將 URL 欄位的檔案批次下載至指定目錄。
+讀取 Excel，將 URL 欄位的檔案批次下載至
+「Excel 所在目錄 / Excel 檔名（不含副檔名）」資料夾。
 """
 
 import sys
@@ -123,6 +124,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.record_df: pd.DataFrame | None = None
+
         self._worker: DownloadWorker | None = None
         self._thread: QThread | None = None
         self._setup_ui()
