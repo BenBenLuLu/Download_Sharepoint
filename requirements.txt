@@ -1,5 +1,7 @@
 PyQt5>=5.15
+numpy>=1.24
 pandas>=2.0
 openpyxl>=3.1
 requests>=2.28
 Office365-REST-Python-Client>=2.5
+pyinstaller>=6.0

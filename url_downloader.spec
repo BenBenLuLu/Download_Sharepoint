@@ -1,45 +1,51 @@
 # -*- mode: python ; coding: utf-8 -*-
 # PyInstaller spec for URL Batch Downloader
-# Build command:  pyinstaller url_downloader.spec
+# Build command:  pyinstaller url_downloader.spec --clean
 
 block_cipher = None
+
+# ── Collect packages that have binary extensions or dynamic imports ────────
+from PyInstaller.utils.hooks import collect_all, collect_submodules
+
+numpy_d,    numpy_b,    numpy_h    = collect_all('numpy')
+pandas_d,   pandas_b,   pandas_h   = collect_all('pandas')
+openpyxl_d, openpyxl_b, openpyxl_h = collect_all('openpyxl')
 
 a = Analysis(
     ['url_downloader.py'],
     pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=[
-        # pandas / openpyxl
-        'openpyxl',
-        'openpyxl.styles',
-        'openpyxl.utils',
-        'openpyxl.workbook',
-        'openpyxl.reader.excel',
-        # requests
-        'requests',
-        'urllib3',
-        'certifi',
-        'charset_normalizer',
-        'idna',
-        # office365-rest-python-client (loaded lazily, must be explicit)
-        'office365',
-        'office365.sharepoint',
-        'office365.sharepoint.client_context',
-        'office365.runtime',
-        'office365.runtime.auth',
-        'office365.runtime.auth.user_credential',
-        # msal (dependency of office365)
-        'msal',
-        'msal.application',
-        'msal.token_cache',
-        # PyQt5
-        'PyQt5',
-        'PyQt5.QtWidgets',
-        'PyQt5.QtCore',
-        'PyQt5.QtGui',
-        'PyQt5.sip',
-    ],
+    binaries=[] + numpy_b + pandas_b + openpyxl_b,
+    datas=[]   + numpy_d  + pandas_d  + openpyxl_d,
+    hiddenimports=(
+        numpy_h + pandas_h + openpyxl_h
+        + collect_submodules('numpy')
+        + collect_submodules('pandas')
+        + [
+            # requests
+            'requests',
+            'urllib3',
+            'certifi',
+            'charset_normalizer',
+            'idna',
+            # office365 (lazy import)
+            'office365',
+            'office365.sharepoint',
+            'office365.sharepoint.client_context',
+            'office365.runtime',
+            'office365.runtime.auth',
+            'office365.runtime.auth.user_credential',
+            # msal (office365 dependency)
+            'msal',
+            'msal.application',
+            'msal.token_cache',
+            # PyQt5
+            'PyQt5',
+            'PyQt5.QtWidgets',
+            'PyQt5.QtCore',
+            'PyQt5.QtGui',
+            'PyQt5.sip',
+        ]
+    ),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -47,7 +53,6 @@ a = Analysis(
         'tkinter',
         'matplotlib',
         'scipy',
-        'numpy',
         'PIL',
         'cv2',
     ],
