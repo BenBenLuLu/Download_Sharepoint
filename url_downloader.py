@@ -386,7 +386,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Error", f"File not found:\n{path}")
             return
         try:
-            record_df = pd.read_excel(path)
+            record_df = pd.read_excel(path,header=1)
+   
         except Exception as exc:
             QMessageBox.critical(self, "Load Failed", str(exc))
             return

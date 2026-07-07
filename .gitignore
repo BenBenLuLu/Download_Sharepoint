@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Excel 資料檔（避免上傳敏感資料）
+*.xlsx
+*.xls
+
+# 下載的檔案
+downloads/
+
+# 編輯器設定
+.vscode/
+.idea/
