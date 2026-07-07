@@ -382,7 +382,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "錯誤", f"找不到檔案:\n{path}")
             return
         try:
-            record_df = pd.read_excel(path)
+            record_df = pd.read_excel(path,head=1)
         except Exception as exc:
             QMessageBox.critical(self, "讀取失敗", str(exc))
             return
