@@ -1,8 +1,8 @@
 """
-URL Downloader
-讀取 Excel，將 URL 欄位的檔案批次下載至
-「Excel 所在目錄 / Excel 檔名（不含副檔名）」資料夾。
-SharePoint URL 自動使用 Microsoft 帳號認證下載。
+URL Batch Downloader
+Reads an Excel file, downloads files from the URL column to
+a folder named after the Excel file in the same directory.
+SharePoint URLs are downloaded using Microsoft account credentials.
 """
 
 import sys
@@ -25,7 +25,7 @@ from PyQt5.QtGui import QColor, QFont
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 檢查 office365 套件是否已安裝
+# Check office365 package availability
 # ──────────────────────────────────────────────────────────────────────────────
 
 try:
@@ -37,7 +37,7 @@ except ModuleNotFoundError:
 
 
 def _ensure_office365() -> bool:
-    """若套件未安裝，嘗試用 pip 自動安裝；成功回傳 True。"""
+    """Try to install office365 via pip if missing; returns True on success."""
     global _OFFICE365_AVAILABLE
     if _OFFICE365_AVAILABLE:
         return True
@@ -64,14 +64,14 @@ def _is_sharepoint(url: str) -> bool:
 
 def _parse_sharepoint_url(url: str) -> tuple[str, str]:
     """
-    從 SharePoint 完整 URL 拆出 (site_url, server_relative_url)。
-    例：
+    Split a full SharePoint URL into (site_url, server_relative_url).
+    Example:
       https://tenant.sharepoint.com/sites/MySite/Folder/file.docx
-      → site_url = "https://tenant.sharepoint.com/sites/MySite"
-        rel_url  = "/sites/MySite/Folder/file.docx"
+      -> site_url = "https://tenant.sharepoint.com/sites/MySite"
+         rel_url  = "/sites/MySite/Folder/file.docx"
     """
     parsed = urlparse(url)
-    path   = unquote(parsed.path)          # 解碼 %20 等
+    path   = unquote(parsed.path)
     base   = f"{parsed.scheme}://{parsed.netloc}"
 
     for prefix in ("/sites/", "/teams/", "/personal/"):
@@ -90,12 +90,12 @@ def _parse_sharepoint_url(url: str) -> tuple[str, str]:
 
 def _download_sharepoint_file(url: str, dest_path: str,
                                username: str, password: str) -> None:
-    """用 office365-rest-python-client 認證後下載 SharePoint 檔案。"""
+    """Authenticate with office365-rest-python-client and download a SharePoint file."""
     if not _ensure_office365():
         raise RuntimeError(
-            "缺少必要套件，請在命令列執行：\n"
+            "Missing required package. Please run:\n"
             "  pip install Office365-REST-Python-Client\n"
-            "安裝後重新啟動程式。"
+            "Then restart the application."
         )
 
     from office365.sharepoint.client_context import ClientContext
@@ -114,7 +114,7 @@ def _download_sharepoint_file(url: str, dest_path: str,
 # ──────────────────────────────────────────────────────────────────────────────
 
 class DownloadWorker(QObject):
-    """在背景執行緒中逐一下載 URL 清單中的檔案。"""
+    """Downloads files from the URL list in a background thread."""
 
     progress = pyqtSignal(int, int)          # (current_index, total)
     row_done = pyqtSignal(int, str, str)     # (row_index, status, detail)
@@ -137,21 +137,22 @@ class DownloadWorker(QObject):
         total = len(self.rows)
         for idx, item in enumerate(self.rows):
             if self._cancel:
-                self.log_msg.emit("⚠️  下載已取消。")
+                self.log_msg.emit("⚠️  Download cancelled.")
                 break
 
             row_idx  = item["row"]
             url      = item["url"].strip()
             filename = item["filename"]
 
-            self.log_msg.emit(f"[{idx+1}/{total}] 下載: {url}")
+            self.log_msg.emit(f"[{idx+1}/{total}] Downloading: {url}")
             try:
                 dest_path = _unique_path(os.path.join(self.dest_dir, filename))
 
                 if _is_sharepoint(url):
                     if not self.username or not self.password:
                         raise ValueError(
-                            "SharePoint URL 需要帳號密碼，請填寫 Step 2 的認證欄位。"
+                            "SharePoint URL requires credentials. "
+                            "Please fill in Step 2 (username and password)."
                         )
                     _download_sharepoint_file(
                         url, dest_path, self.username, self.password
@@ -160,12 +161,12 @@ class DownloadWorker(QObject):
                     self._download_http(url, dest_path)
 
                 final_name = os.path.basename(dest_path)
-                self.row_done.emit(row_idx, "完成", final_name)
-                self.log_msg.emit(f"  ✔ 儲存至: {dest_path}")
+                self.row_done.emit(row_idx, "Done", final_name)
+                self.log_msg.emit(f"  ✔ Saved to: {dest_path}")
 
             except Exception as exc:
-                self.row_done.emit(row_idx, "失敗", str(exc))
-                self.log_msg.emit(f"  ✘ 錯誤: {exc}")
+                self.row_done.emit(row_idx, "Failed", str(exc))
+                self.log_msg.emit(f"  ✘ Error: {exc}")
 
             self.progress.emit(idx + 1, total)
 
@@ -175,7 +176,7 @@ class DownloadWorker(QObject):
         resp = requests.get(url, stream=True, timeout=30)
         resp.raise_for_status()
 
-        # Content-Disposition 可能含更精確的檔名
+        # Use filename from Content-Disposition header if available
         cd = resp.headers.get("Content-Disposition", "")
         if "filename=" in cd:
             fname = cd.split("filename=")[-1].strip().strip('"').strip("'")
@@ -222,9 +223,9 @@ def _filename_from_url(url: str) -> str:
 class MainWindow(QMainWindow):
 
     STATUS_COLOR = {
-        "等待中": "#888888",
-        "完成":   "#27ae60",
-        "失敗":   "#e74c3c",
+        "Pending": "#888888",
+        "Done":    "#27ae60",
+        "Failed":  "#e74c3c",
     }
 
     def __init__(self):
@@ -238,7 +239,7 @@ class MainWindow(QMainWindow):
     # ── UI ─────────────────────────────────────────────────────────────────────
 
     def _setup_ui(self):
-        self.setWindowTitle("URL 批次下載工具")
+        self.setWindowTitle("URL Batch Downloader")
         self.resize(960, 720)
 
         central = QWidget()
@@ -247,64 +248,67 @@ class MainWindow(QMainWindow):
         root.setSpacing(8)
         root.setContentsMargins(12, 12, 12, 12)
 
-        # ── Step 1: 讀取 Excel ─────────────────────────────────────────────
-        g1 = QGroupBox("Step 1：選擇 Excel 檔案")
+        # ── Step 1: Load Excel ─────────────────────────────────────────────
+        g1 = QGroupBox("Step 1: Select Excel File")
         l1 = QHBoxLayout(g1)
 
         self.xlsx_path_edit = QLineEdit()
-        self.xlsx_path_edit.setPlaceholderText("Excel 檔案路徑…")
+        self.xlsx_path_edit.setPlaceholderText("Excel file path...")
         self.xlsx_path_edit.setReadOnly(True)
 
-        btn_browse = QPushButton("瀏覽…")
-        btn_browse.setFixedWidth(80)
+        btn_browse = QPushButton("Browse...")
+        btn_browse.setFixedWidth(90)
         btn_browse.clicked.connect(self._browse_xlsx)
 
-        self.btn_load = QPushButton("載入")
+        self.btn_load = QPushButton("Load")
         self.btn_load.setFixedWidth(70)
         self.btn_load.clicked.connect(self._load_xlsx)
 
-        l1.addWidget(QLabel("檔案:"))
+        l1.addWidget(QLabel("File:"))
         l1.addWidget(self.xlsx_path_edit)
         l1.addWidget(btn_browse)
         l1.addWidget(self.btn_load)
         root.addWidget(g1)
 
-        # ── Step 2: SharePoint 認證 ────────────────────────────────────────
-        g2 = QGroupBox("Step 2：SharePoint / Microsoft 帳號認證（一般 HTTP URL 可留空）")
+        # ── Step 2: SharePoint credentials ────────────────────────────────
+        g2 = QGroupBox(
+            "Step 2: SharePoint / Microsoft Account Credentials  "
+            "(leave blank for regular HTTP URLs)"
+        )
         l2 = QHBoxLayout(g2)
 
         self.user_edit = QLineEdit()
-        self.user_edit.setPlaceholderText("帳號（e-mail）")
+        self.user_edit.setPlaceholderText("Username (e-mail)")
 
         self.pass_edit = QLineEdit()
-        self.pass_edit.setPlaceholderText("密碼")
+        self.pass_edit.setPlaceholderText("Password")
         self.pass_edit.setEchoMode(QLineEdit.Password)
 
-        l2.addWidget(QLabel("帳號:"))
+        l2.addWidget(QLabel("Username:"))
         l2.addWidget(self.user_edit, 3)
         l2.addSpacing(16)
-        l2.addWidget(QLabel("密碼:"))
+        l2.addWidget(QLabel("Password:"))
         l2.addWidget(self.pass_edit, 2)
         root.addWidget(g2)
 
-        # ── Step 3: 下載目錄（唯讀，自動產生）────────────────────────────
-        g3 = QGroupBox("Step 3：下載目的目錄（自動產生）")
+        # ── Step 3: Output directory (read-only, auto-generated) ───────────
+        g3 = QGroupBox("Step 3: Download Directory (auto-generated)")
         l3 = QHBoxLayout(g3)
 
         self.dest_display = QLineEdit()
         self.dest_display.setReadOnly(True)
-        self.dest_display.setPlaceholderText("載入 Excel 後自動設定…")
+        self.dest_display.setPlaceholderText("Auto-set after loading Excel...")
         self.dest_display.setStyleSheet("color: #555; background: #f5f5f5;")
 
-        l3.addWidget(QLabel("目錄:"))
+        l3.addWidget(QLabel("Directory:"))
         l3.addWidget(self.dest_display)
         root.addWidget(g3)
 
-        # ── 表格 + Log ─────────────────────────────────────────────────────
+        # ── Table + Log ────────────────────────────────────────────────────
         splitter = QSplitter(Qt.Vertical)
 
         self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["URL", "檔名", "狀態"])
+        self.table.setHorizontalHeaderLabels(["URL", "Filename", "Status"])
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
@@ -329,17 +333,17 @@ class MainWindow(QMainWindow):
         # ── Buttons ────────────────────────────────────────────────────────
         btn_row = QHBoxLayout()
 
-        self.btn_start = QPushButton("開始下載")
+        self.btn_start = QPushButton("Start Download")
         self.btn_start.setFixedHeight(36)
         self.btn_start.setEnabled(False)
         self.btn_start.clicked.connect(self._start_download)
 
-        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel = QPushButton("Cancel")
         self.btn_cancel.setFixedHeight(36)
         self.btn_cancel.setEnabled(False)
         self.btn_cancel.clicked.connect(self._cancel_download)
 
-        btn_clear = QPushButton("清除 Log")
+        btn_clear = QPushButton("Clear Log")
         btn_clear.setFixedHeight(36)
         btn_clear.clicked.connect(self.log_box.clear)
 
@@ -349,13 +353,13 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(btn_clear)
         root.addLayout(btn_row)
 
-        self._log("程式已啟動。")
-        self._log("• SharePoint URL → 請先填入 Step 2 帳號密碼再下載。")
-        self._log("• 一般 HTTP(S) URL → Step 2 可留空直接下載。")
+        self._log("Application started.")
+        self._log("• SharePoint URLs  → fill in Step 2 credentials before downloading.")
+        self._log("• Regular HTTP(S) URLs → Step 2 can be left blank.")
         if not _OFFICE365_AVAILABLE:
             self._log("")
-            self._log("⚠️  警告：未偵測到 office365 套件，SharePoint 下載功能無法使用。")
-            self._log("   請在命令列執行以下指令後重新啟動程式：")
+            self._log("⚠️  WARNING: office365 package not found. SharePoint download is unavailable.")
+            self._log("   Please run the following command and restart the application:")
             self._log(f"   {sys.executable} -m pip install Office365-REST-Python-Client")
 
     # ── Helpers ────────────────────────────────────────────────────────────────
@@ -368,7 +372,7 @@ class MainWindow(QMainWindow):
 
     def _browse_xlsx(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "選擇 Excel 檔案", "", "Excel 檔案 (*.xlsx *.xls)"
+            self, "Select Excel File", "", "Excel Files (*.xlsx *.xls)"
         )
         if path:
             self.xlsx_path_edit.setText(path)
@@ -376,21 +380,22 @@ class MainWindow(QMainWindow):
     def _load_xlsx(self):
         path = self.xlsx_path_edit.text().strip()
         if not path:
-            QMessageBox.warning(self, "提示", "請先選擇 Excel 檔案。")
+            QMessageBox.warning(self, "Notice", "Please select an Excel file first.")
             return
         if not os.path.isfile(path):
-            QMessageBox.critical(self, "錯誤", f"找不到檔案:\n{path}")
+            QMessageBox.critical(self, "Error", f"File not found:\n{path}")
             return
         try:
             record_df = pd.read_excel(path)
         except Exception as exc:
-            QMessageBox.critical(self, "讀取失敗", str(exc))
+            QMessageBox.critical(self, "Load Failed", str(exc))
             return
 
         if "URL" not in record_df.columns:
             QMessageBox.critical(
-                self, "欄位缺失",
-                f"Excel 中找不到 'URL' 欄位。\n目前欄位: {list(record_df.columns)}"
+                self, "Missing Column",
+                f"'URL' column not found in the Excel file.\n"
+                f"Available columns: {list(record_df.columns)}"
             )
             return
 
@@ -402,8 +407,8 @@ class MainWindow(QMainWindow):
         self._dest_dir = dest_dir
         self.dest_display.setText(dest_dir)
         self._populate_table()
-        self._log(f"✔ 已載入 {len(record_df)} 筆（來自 {os.path.basename(path)}）。")
-        self._log(f"   下載目錄: {dest_dir}")
+        self._log(f"✔ Loaded {len(record_df)} rows from {os.path.basename(path)}.")
+        self._log(f"   Download directory: {dest_dir}")
         self.btn_start.setEnabled(True)
 
     def _populate_table(self):
@@ -418,8 +423,8 @@ class MainWindow(QMainWindow):
             self.table.insertRow(r)
             self.table.setItem(r, 0, QTableWidgetItem(url))
             self.table.setItem(r, 1, QTableWidgetItem(filename))
-            si = QTableWidgetItem("等待中")
-            si.setForeground(QColor(self.STATUS_COLOR["等待中"]))
+            si = QTableWidgetItem("Pending")
+            si.setForeground(QColor(self.STATUS_COLOR["Pending"]))
             self.table.setItem(r, 2, si)
 
     def _collect_rows(self) -> list[dict]:
@@ -436,21 +441,20 @@ class MainWindow(QMainWindow):
 
     def _start_download(self):
         if not self._dest_dir:
-            QMessageBox.warning(self, "提示", "請先載入 Excel 檔案。")
+            QMessageBox.warning(self, "Notice", "Please load an Excel file first.")
             return
 
         rows = self._collect_rows()
         if not rows:
-            QMessageBox.information(self, "提示", "沒有可下載的項目。")
+            QMessageBox.information(self, "Notice", "No items to download.")
             return
 
-        # 若有 SharePoint URL 但未填帳號，警告後讓使用者決定是否繼續
         has_sp = any(_is_sharepoint(r["url"]) for r in rows)
         if has_sp and not self.user_edit.text().strip():
             ret = QMessageBox.question(
-                self, "未填認證資訊",
-                "清單中含有 SharePoint URL，但尚未填寫帳號密碼。\n"
-                "SharePoint 檔案將會下載失敗。\n\n確定繼續？",
+                self, "Credentials Missing",
+                "The list contains SharePoint URLs but no credentials were entered.\n"
+                "SharePoint files will fail to download.\n\nContinue anyway?",
                 QMessageBox.Yes | QMessageBox.No,
             )
             if ret == QMessageBox.No:
@@ -460,8 +464,8 @@ class MainWindow(QMainWindow):
 
         for r in range(self.table.rowCount()):
             item = self.table.item(r, 2)
-            item.setText("等待中")
-            item.setForeground(QColor(self.STATUS_COLOR["等待中"]))
+            item.setText("Pending")
+            item.setForeground(QColor(self.STATUS_COLOR["Pending"]))
 
         self.progress_bar.setMaximum(len(rows))
         self.progress_bar.setValue(0)
@@ -494,24 +498,24 @@ class MainWindow(QMainWindow):
 
     def _on_progress(self, current: int, total: int):
         self.progress_bar.setValue(current)
-        self.setWindowTitle(f"URL 批次下載工具 [{current}/{total}]")
+        self.setWindowTitle(f"URL Batch Downloader [{current}/{total}]")
 
     def _on_row_done(self, row_idx: int, status: str, detail: str):
         si = self.table.item(row_idx, 2)
         si.setText(status)
         si.setForeground(QColor(self.STATUS_COLOR.get(status, "#000000")))
-        if status == "完成":
+        if status == "Done":
             self.table.item(row_idx, 1).setText(detail)
 
     def _on_finished(self):
         self.btn_start.setEnabled(True)
         self.btn_cancel.setEnabled(False)
-        self.setWindowTitle("URL 批次下載工具")
+        self.setWindowTitle("URL Batch Downloader")
         done = sum(1 for r in range(self.table.rowCount())
-                   if self.table.item(r, 2).text() == "完成")
+                   if self.table.item(r, 2).text() == "Done")
         fail = sum(1 for r in range(self.table.rowCount())
-                   if self.table.item(r, 2).text() == "失敗")
-        self._log(f"\n── 下載完畢：成功 {done} 筆，失敗 {fail} 筆 ──")
+                   if self.table.item(r, 2).text() == "Failed")
+        self._log(f"\n── Finished: {done} succeeded, {fail} failed ──")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
