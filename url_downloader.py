@@ -7,6 +7,7 @@ SharePoint URL 自動使用 Microsoft 帳號認證下載。
 
 import sys
 import os
+import subprocess
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 
@@ -21,6 +22,36 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject
 from PyQt5.QtGui import QColor, QFont
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 檢查 office365 套件是否已安裝
+# ──────────────────────────────────────────────────────────────────────────────
+
+try:
+    from office365.sharepoint.client_context import ClientContext       # noqa: F401
+    from office365.runtime.auth.user_credential import UserCredential   # noqa: F401
+    _OFFICE365_AVAILABLE = True
+except ModuleNotFoundError:
+    _OFFICE365_AVAILABLE = False
+
+
+def _ensure_office365() -> bool:
+    """若套件未安裝，嘗試用 pip 自動安裝；成功回傳 True。"""
+    global _OFFICE365_AVAILABLE
+    if _OFFICE365_AVAILABLE:
+        return True
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "Office365-REST-Python-Client"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        from office365.sharepoint.client_context import ClientContext       # noqa: F401
+        from office365.runtime.auth.user_credential import UserCredential   # noqa: F401
+        _OFFICE365_AVAILABLE = True
+        return True
+    except Exception:
+        return False
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -60,6 +91,13 @@ def _parse_sharepoint_url(url: str) -> tuple[str, str]:
 def _download_sharepoint_file(url: str, dest_path: str,
                                username: str, password: str) -> None:
     """用 office365-rest-python-client 認證後下載 SharePoint 檔案。"""
+    if not _ensure_office365():
+        raise RuntimeError(
+            "缺少必要套件，請在命令列執行：\n"
+            "  pip install Office365-REST-Python-Client\n"
+            "安裝後重新啟動程式。"
+        )
+
     from office365.sharepoint.client_context import ClientContext
     from office365.runtime.auth.user_credential import UserCredential
 
@@ -314,6 +352,11 @@ class MainWindow(QMainWindow):
         self._log("程式已啟動。")
         self._log("• SharePoint URL → 請先填入 Step 2 帳號密碼再下載。")
         self._log("• 一般 HTTP(S) URL → Step 2 可留空直接下載。")
+        if not _OFFICE365_AVAILABLE:
+            self._log("")
+            self._log("⚠️  警告：未偵測到 office365 套件，SharePoint 下載功能無法使用。")
+            self._log("   請在命令列執行以下指令後重新啟動程式：")
+            self._log(f"   {sys.executable} -m pip install Office365-REST-Python-Client")
 
     # ── Helpers ────────────────────────────────────────────────────────────────
 
