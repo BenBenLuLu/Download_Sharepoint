@@ -1,6 +1,7 @@
 """
 URL Downloader
-讀取 URL_contactor.xlsx，將 URL 欄位的檔案批次下載至指定目錄。
+讀取 Excel，將 URL 欄位的檔案批次下載至
+「Excel 所在目錄 / Excel 檔名（不含副檔名）」資料夾。
 """
 
 import sys
@@ -123,6 +124,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.record_df: pd.DataFrame | None = None
+        self._dest_dir: str = ""          # 自動從 Excel 路徑推算
         self._worker: DownloadWorker | None = None
         self._thread: QThread | None = None
         self._setup_ui()
@@ -140,11 +142,11 @@ class MainWindow(QMainWindow):
         root_layout.setContentsMargins(12, 12, 12, 12)
 
         # ── Step 1: 讀取 Excel ──────────────────────────────────────────────
-        xlsx_group = QGroupBox("Step 1：選擇 URL_contactor.xlsx")
+        xlsx_group = QGroupBox("Step 1：選擇 Excel 檔案")
         xlsx_layout = QHBoxLayout(xlsx_group)
 
         self.xlsx_path_edit = QLineEdit()
-        self.xlsx_path_edit.setPlaceholderText("URL_contactor.xlsx 的檔案路徑…")
+        self.xlsx_path_edit.setPlaceholderText("Excel 檔案路徑…")
         self.xlsx_path_edit.setReadOnly(True)
 
         btn_browse_xlsx = QPushButton("瀏覽…")
@@ -161,20 +163,17 @@ class MainWindow(QMainWindow):
         xlsx_layout.addWidget(self.btn_load)
         root_layout.addWidget(xlsx_group)
 
-        # ── Step 2: 目的目錄 ────────────────────────────────────────────────
-        dest_group = QGroupBox("Step 2：選擇下載目的目錄")
+        # ── Step 2: 自動顯示下載目錄（唯讀） ──────────────────────────────
+        dest_group = QGroupBox("Step 2：下載目的目錄（自動產生）")
         dest_layout = QHBoxLayout(dest_group)
 
-        self.dest_path_edit = QLineEdit()
-        self.dest_path_edit.setPlaceholderText("下載目的目錄…")
-
-        btn_browse_dest = QPushButton("瀏覽…")
-        btn_browse_dest.setFixedWidth(80)
-        btn_browse_dest.clicked.connect(self._browse_dest)
+        self.dest_display = QLineEdit()
+        self.dest_display.setReadOnly(True)
+        self.dest_display.setPlaceholderText("載入 Excel 後自動設定…")
+        self.dest_display.setStyleSheet("color: #555; background: #f5f5f5;")
 
         dest_layout.addWidget(QLabel("目錄:"))
-        dest_layout.addWidget(self.dest_path_edit)
-        dest_layout.addWidget(btn_browse_dest)
+        dest_layout.addWidget(self.dest_display)
         root_layout.addWidget(dest_group)
 
         # ── Step 3: 表格 + log ──────────────────────────────────────────────
@@ -243,11 +242,6 @@ class MainWindow(QMainWindow):
         if path:
             self.xlsx_path_edit.setText(path)
 
-    def _browse_dest(self):
-        path = QFileDialog.getExistingDirectory(self, "選擇下載目的目錄", "")
-        if path:
-            self.dest_path_edit.setText(path)
-
     def _load_xlsx(self):
         path = self.xlsx_path_edit.text().strip()
         if not path:
@@ -270,9 +264,17 @@ class MainWindow(QMainWindow):
             )
             return
 
+        # 自動推算下載目錄：Excel 所在目錄 / Excel 檔名（不含副檔名）
+        xlsx_stem  = Path(path).stem
+        xlsx_dir   = Path(path).parent
+        dest_dir   = str(xlsx_dir / xlsx_stem)
+
         self.record_df = record_df
+        self._dest_dir = dest_dir
+        self.dest_display.setText(dest_dir)
         self._populate_table()
         self._log(f"✔ 已載入 {len(record_df)} 筆資料（來自 {os.path.basename(path)}）。")
+        self._log(f"   下載目錄將建立於: {dest_dir}")
         self.btn_start.setEnabled(True)
 
     def _populate_table(self):
@@ -305,9 +307,9 @@ class MainWindow(QMainWindow):
     # ── Download control ───────────────────────────────────────────────────────
 
     def _start_download(self):
-        dest = self.dest_path_edit.text().strip()
+        dest = self._dest_dir
         if not dest:
-            QMessageBox.warning(self, "提示", "請先選擇下載目的目錄。")
+            QMessageBox.warning(self, "提示", "請先載入 Excel 檔案。")
             return
         os.makedirs(dest, exist_ok=True)
 
