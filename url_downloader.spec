@@ -34,7 +34,7 @@ a = Analysis(
             'office365.runtime',
             'office365.runtime.auth',
             'office365.runtime.auth.user_credential',
-            # msal (office365 dependency)
+            # msal (SharePoint device-code auth)
             'msal',
             'msal.application',
             'msal.token_cache',
