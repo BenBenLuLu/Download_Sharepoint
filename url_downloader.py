@@ -164,15 +164,11 @@ class SharePointAuth:
                     errors.append(f"[{cid[:8]}…] {exc}")
 
         hint = (
-            "\n\nYour company (shl-group.com) may block public Microsoft apps.\n"
-            "Ask IT to register an Azure AD app with:\n"
-            "  • Platform: Mobile & desktop → Public client/native\n"
-            "  • Permissions: Files.Read.All + Sites.Read.All (delegated)\n"
-            "  • Admin consent granted\n"
-            "Then paste the App (client) ID in the 'Client ID' field."
+            "\n\nIf you see AADSTS700016, the Client ID is not registered in shl-group.com.\n"
+            "Ask IT to follow AZURE_APP_SETUP.md and grant admin consent."
         )
         raise RuntimeError(
-            "All sign-in methods failed.\n\n" + "\n".join(errors[-4:]) + hint
+            "Sign-in failed.\n\n" + "\n".join(errors[-3:]) + hint
         )
 
     def get_bearer_token(self) -> str:
@@ -507,11 +503,24 @@ class MainWindow(QMainWindow):
         row_client = QHBoxLayout()
         self.client_id_edit = QLineEdit()
         self.client_id_edit.setPlaceholderText(
-            "Optional – App (client) ID from IT  (leave blank to auto-try)"
+            "Required – App (client) ID from IT  (see IT Setup Guide)"
         )
+        btn_it_help = QPushButton("IT Setup Guide")
+        btn_it_help.setFixedWidth(110)
+        btn_it_help.clicked.connect(self._show_it_guide)
         row_client.addWidget(QLabel("Client ID:"))
-        row_client.addWidget(self.client_id_edit)
+        row_client.addWidget(self.client_id_edit, 1)
+        row_client.addWidget(btn_it_help)
         l2v.addLayout(row_client)
+
+        note = QLabel(
+            "<span style='color:#c0392b'>"
+            "shl-group.com blocks public Microsoft apps. "
+            "Client ID from IT is <b>required</b>."
+            "</span>"
+        )
+        note.setWordWrap(True)
+        l2v.addWidget(note)
 
         row_signin = QHBoxLayout()
         self.btn_signin = QPushButton("Sign in with Microsoft")
@@ -577,7 +586,7 @@ class MainWindow(QMainWindow):
 
         self._log("Application started.")
         self._log("Step 1: Load Excel  →  Step 2: Sign in  →  Step 3: Start Download")
-        self._log("• Sign in opens your browser directly (no device code needed).")
+        self._log("• shl-group.com requires a Client ID from IT – click 'IT Setup Guide'.")
         if not _OFFICE365_AVAILABLE:
             self._log("")
             self._log("⚠️  office365/msal not found. Run:")
@@ -669,6 +678,18 @@ class MainWindow(QMainWindow):
 
     # ── Sign-in ──────────────────────────────────────────────────────────────
 
+    def _show_it_guide(self):
+        guide_path = Path(__file__).parent / "AZURE_APP_SETUP.md"
+        text = guide_path.read_text(encoding="utf-8") if guide_path.is_file() else (
+            "Ask IT to register an Azure AD app with:\n"
+            "• Platform: Mobile & desktop → http://localhost\n"
+            "• Permissions: Files.Read.All + Sites.Read.All (delegated)\n"
+            "• Admin consent granted\n"
+            "• Allow public client flows: Yes\n"
+            "Then paste the Application (client) ID in the Client ID field."
+        )
+        QMessageBox.information(self, "IT Setup Guide", f"<pre>{text[:3000]}</pre>")
+
     def _reset_signin_ui(self):
         self.btn_signin.setEnabled(True)
         self.btn_signin.setText("Sign in with Microsoft")
@@ -682,15 +703,20 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Cannot Sign In", str(exc))
             return
 
+        client_id = self.client_id_edit.text().strip()
+        if not client_id:
+            QMessageBox.warning(
+                self, "Client ID Required",
+                "Your company (shl-group.com) blocks all public Microsoft apps.\n\n"
+                "You must get an App (client) ID from IT first.\n\n"
+                "Click 'IT Setup Guide' for the registration steps,\n"
+                "then paste the Client ID and try again.",
+            )
+            return
+
         self._auth._tenant  = tenant
         self._auth._app     = None
         self._auth._account = None
-
-        client_ids: list[str] = []
-        custom = self.client_id_edit.text().strip()
-        if custom:
-            client_ids.append(custom)
-        client_ids.extend(_MS_CLIENT_IDS)
 
         self.btn_signin.setEnabled(False)
         self.btn_signin.setText("Signing in...")
@@ -699,10 +725,10 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
 
         self._log(f"Opening browser for sign-in ({sp_host}) ...")
-        self._log("Complete login + MFA in the browser window.")
+        self._log(f"Using Client ID: {client_id[:8]}...")
 
         try:
-            self._auth.sign_in_interactive(sp_host, client_ids)
+            self._auth.sign_in_interactive(sp_host, [client_id])
         except Exception as exc:
             self._reset_signin_ui()
             self.signin_status.setText("Sign-in failed")
