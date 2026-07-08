@@ -7,9 +7,9 @@ SharePoint URLs use Microsoft Device Code sign-in (supports MFA / Conditional Ac
 
 import sys
 import os
+import base64
 import subprocess
 import tempfile
-import webbrowser
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 
@@ -26,11 +26,13 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject
 from PyQt5.QtGui import QColor, QFont
 
 
-# Microsoft public client IDs for device-code flow
+# Public client IDs to try (Azure CLI is most widely consented in enterprises)
 _MS_CLIENT_IDS = [
+    "04b07795-8ddb-461a-bbee-04f9e1bf07b9",   # Azure CLI
     "14d82eec-204b-4c2f-b7e0-44b84b7b7ba1",   # Microsoft Graph PowerShell
-    "31359c7f-bd7e-475c-86db-fdb8c937548e",   # PnP Management Shell (SharePoint)
+    "1950a258-227b-4e31-a9cf-717495945fc2",   # Azure PowerShell
 ]
+_GRAPH_SCOPES = ["https://graph.microsoft.com/.default"]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -66,18 +68,20 @@ def _ensure_office365() -> bool:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# SharePoint auth (Device Code Flow – bypasses Conditional Access on passwords)
+# SharePoint auth – Interactive browser login + Microsoft Graph download
 # ──────────────────────────────────────────────────────────────────────────────
 
 class SharePointAuth:
-    """Caches MSAL tokens for the current session."""
+    """MSAL session for SharePoint / Graph file downloads."""
 
     def __init__(self):
-        self._app      = None
-        self._account  = None
-        self._username = ""
-        self._tenant   = "organizations"   # work/school accounts
-        self._scopes_cache: dict[str, list[str]] = {}
+        self._app         = None
+        self._client_id   = _MS_CLIENT_IDS[0]
+        self._account     = None
+        self._username    = ""
+        self._tenant      = "organizations"
+        self._scopes: list[str] = _GRAPH_SCOPES
+        self._use_graph   = True
 
     @property
     def is_signed_in(self) -> bool:
@@ -87,126 +91,110 @@ class SharePointAuth:
     def username(self) -> str:
         return self._username
 
-    def _host_from_url(self, url: str) -> str:
-        return urlparse(url).netloc          # e.g. shlgroup.sharepoint.com
+    @property
+    def use_graph(self) -> bool:
+        return self._use_graph
 
-    def _scopes_for(self, host: str) -> list[str]:
-        if host not in self._scopes_cache:
-            self._scopes_cache[host] = [f"https://{host}/.default"]
-        return self._scopes_cache[host]
-
-    def __init__(self):
-        self._app      = None
-        self._client_id = _MS_CLIENT_IDS[0]
-        self._account  = None
-        self._username = ""
-        self._tenant   = "organizations"
-        self._scopes_cache: dict[str, list[str]] = {}
-
-    def _get_app(self, client_id: str | None = None):
-        cid = client_id or self._client_id
-        if self._app is None or cid != self._client_id:
-            import msal
-            self._client_id = cid
+    def _get_app(self, client_id: str) -> "msal.PublicClientApplication":
+        import msal
+        if self._app is None or client_id != self._client_id:
+            self._client_id = client_id
             authority = f"https://login.microsoftonline.com/{self._tenant}"
-            self._app = msal.PublicClientApplication(
-                cid, authority=authority,
-            )
+            self._app = msal.PublicClientApplication(client_id, authority=authority)
         return self._app
 
-    def start_device_flow(self, sharepoint_host: str) -> dict:
-        """Phase 1 – get device code (run on UI thread). Returns MSAL flow dict."""
-        if not _ensure_office365():
-            raise RuntimeError(
-                "Missing packages. Run:\n"
-                "  pip install Office365-REST-Python-Client msal"
-            )
-
-        host = sharepoint_host.lower().strip()
-        if not host.endswith(".sharepoint.com"):
-            raise ValueError(f"Invalid SharePoint host: {host}")
-
-        scopes = self._scopes_for(host)
-
-        # Try silent re-use first
-        for cid in _MS_CLIENT_IDS:
-            try:
-                app = self._get_app(cid)
-                accounts = app.get_accounts()
-                if accounts:
-                    result = app.acquire_token_silent(scopes, account=accounts[0])
-                    if result and "access_token" in result:
-                        self._account  = accounts[0]
-                        self._username = accounts[0].get("username", "")
-                        return {"_silent": True}
-            except Exception:
-                continue
-
-        # Request new device code – try each client ID
-        last_err = None
-        for cid in _MS_CLIENT_IDS:
-            try:
-                app  = self._get_app(cid)
-                flow = app.initiate_device_flow(scopes=scopes)
-                if "user_code" in flow:
-                    flow["_client_id"] = cid
-                    return flow
-                last_err = str(flow)
-            except Exception as exc:
-                last_err = str(exc)
-
-        raise RuntimeError(
-            f"Could not get sign-in code from Microsoft.\n{last_err}\n\n"
-            "Check your network / VPN, or contact IT to allow Device Code login."
-        )
-
-    def finish_device_flow(self, flow: dict) -> None:
-        """Phase 2 – wait for user to complete browser sign-in."""
-        if flow.get("_silent"):
-            return
-
-        app = self._get_app(flow.get("_client_id"))
-        result = app.acquire_token_by_device_flow(flow)
-        if "access_token" not in result:
-            desc = result.get("error_description", result.get("error", "Unknown error"))
-            raise RuntimeError(f"Sign-in failed: {desc}")
-
-        accounts = app.get_accounts()
+    def _apply_result(self, result: dict, scopes: list[str], use_graph: bool) -> None:
+        self._scopes    = scopes
+        self._use_graph = use_graph
+        accounts = self._get_app(self._client_id).get_accounts()
         self._account  = accounts[0] if accounts else None
         self._username = (
             self._account.get("username", "") if self._account
             else result.get("id_token_claims", {}).get("preferred_username", "")
         )
 
-    def device_sign_in(self, sharepoint_host: str, log, on_device_code=None) -> None:
-        """Legacy all-in-one helper (kept for compatibility)."""
-        flow = self.start_device_flow(sharepoint_host)
-        if flow.get("_silent"):
-            log(f"✔ Re-using cached session for {self._username}")
-            return
-        uri  = flow.get("verification_uri", "https://microsoft.com/devicelogin")
-        code = flow.get("user_code", "")
-        if on_device_code:
-            on_device_code(uri, code, flow.get("message", ""))
-        log("Waiting for browser sign-in...")
-        self.finish_device_flow(flow)
-        log(f"✔ Signed in as {self._username}")
+    def sign_in_interactive(self, sharepoint_host: str,
+                            client_ids: list[str]) -> None:
+        """
+        Open the system browser for Microsoft login (supports MFA / Conditional Access).
+        Tries Microsoft Graph scope first, then SharePoint scope, across several client IDs.
+        """
+        if not _ensure_office365():
+            raise RuntimeError(
+                "Missing packages. Run:\n"
+                "  pip install Office365-REST-Python-Client msal"
+            )
 
-    def acquire_token(self, sharepoint_url: str):
-        """Return a TokenResponse for the given SharePoint URL."""
-        from office365.runtime.auth.token_response import TokenResponse
+        host      = sharepoint_host.lower().strip()
+        sp_scopes = [f"https://{host}/.default"]
+        attempts  = [
+            (_GRAPH_SCOPES, True),
+            (sp_scopes,     False),
+        ]
+        errors: list[str] = []
 
+        for cid in client_ids:
+            app = self._get_app(cid)
+            for scopes, use_graph in attempts:
+                # Silent re-use
+                for acct in app.get_accounts() or [None]:
+                    try:
+                        kwargs = {"scopes": scopes}
+                        if acct:
+                            kwargs["account"] = acct
+                        result = app.acquire_token_silent(**kwargs)
+                        if result and "access_token" in result:
+                            self._apply_result(result, scopes, use_graph)
+                            return
+                    except Exception:
+                        pass
+
+                # Interactive browser
+                try:
+                    result = app.acquire_token_interactive(
+                        scopes=scopes,
+                        prompt="select_account",
+                    )
+                    if result and "access_token" in result:
+                        self._apply_result(result, scopes, use_graph)
+                        return
+                    err = result.get("error_description", str(result))
+                    errors.append(f"[{cid[:8]}…] {err}")
+                except Exception as exc:
+                    errors.append(f"[{cid[:8]}…] {exc}")
+
+        hint = (
+            "\n\nYour company (shl-group.com) may block public Microsoft apps.\n"
+            "Ask IT to register an Azure AD app with:\n"
+            "  • Platform: Mobile & desktop → Public client/native\n"
+            "  • Permissions: Files.Read.All + Sites.Read.All (delegated)\n"
+            "  • Admin consent granted\n"
+            "Then paste the App (client) ID in the 'Client ID' field."
+        )
+        raise RuntimeError(
+            "All sign-in methods failed.\n\n" + "\n".join(errors[-4:]) + hint
+        )
+
+    def get_bearer_token(self) -> str:
         if not self.is_signed_in:
-            raise RuntimeError("Not signed in. Click 'Sign in with Microsoft' first.")
-
-        host   = self._host_from_url(sharepoint_url)
-        scopes = self._scopes_for(host)
-        app    = self._get_app()
-
-        result = app.acquire_token_silent(scopes, account=self._account)
+            raise RuntimeError("Not signed in.")
+        app    = self._get_app(self._client_id)
+        result = app.acquire_token_silent(self._scopes, account=self._account)
         if not result or "access_token" not in result:
             raise RuntimeError("Session expired. Please sign in again.")
+        return result["access_token"]
 
+    def acquire_token(self, sharepoint_url: str):
+        """TokenResponse wrapper for office365-rest-python-client."""
+        from office365.runtime.auth.token_response import TokenResponse
+        host   = urlparse(sharepoint_url).netloc
+        scopes = [f"https://{host}/.default"]
+        app    = self._get_app(self._client_id)
+        result = app.acquire_token_silent(scopes, account=self._account)
+        if not result or "access_token" not in result:
+            result = app.acquire_token_silent(self._scopes, account=self._account)
+        if not result or "access_token" not in result:
+            raise RuntimeError("Session expired. Please sign in again.")
         return TokenResponse.from_json(result)
 
 
@@ -269,24 +257,55 @@ def _sharepoint_host_for_signin(tenant: str, sample_url: str | None) -> str:
     )
 
 
+def _encode_share_url(url: str) -> str:
+    """Encode a SharePoint URL for the Graph /shares/ API."""
+    encoded = base64.urlsafe_b64encode(url.encode("utf-8")).decode("utf-8").rstrip("=")
+    return f"u!{encoded}"
+
+
+def _download_via_graph(url: str, dest_path: str, token: str) -> None:
+    share_id = _encode_share_url(url)
+    api_url  = f"https://graph.microsoft.com/v1.0/shares/{share_id}/driveItem/content"
+    resp = requests.get(
+        api_url,
+        headers={"Authorization": f"Bearer {token}"},
+        stream=True, timeout=120,
+    )
+    resp.raise_for_status()
+    fd, tmp = tempfile.mkstemp(suffix=".tmp")
+    os.close(fd)
+    try:
+        with open(tmp, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=65536):
+                if chunk:
+                    f.write(chunk)
+        _validate_download(tmp)
+        os.replace(tmp, dest_path)
+        tmp = None
+    finally:
+        if tmp and os.path.exists(tmp):
+            os.remove(tmp)
+
+
 def _download_sharepoint_file(url: str, dest_path: str, auth: SharePointAuth) -> None:
+    if auth.use_graph:
+        _download_via_graph(url, dest_path, auth.get_bearer_token())
+        return
+
     from office365.sharepoint.client_context import ClientContext
 
     site_url, rel_url = _parse_sharepoint_url(url)
     ctx = ClientContext(site_url).with_access_token(
         lambda: auth.acquire_token(url)
     )
-
-    # Download to a temp file first; validate before committing
     fd, tmp = tempfile.mkstemp(suffix=".tmp")
     os.close(fd)
     try:
         with open(tmp, "wb") as f:
             ctx.web.get_file_by_server_relative_url(rel_url).download(f).execute_query()
-
         _validate_download(tmp)
         os.replace(tmp, dest_path)
-        tmp = None          # moved successfully
+        tmp = None
     finally:
         if tmp and os.path.exists(tmp):
             os.remove(tmp)
@@ -311,25 +330,6 @@ def _validate_download(path: str) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 # Workers
 # ──────────────────────────────────────────────────────────────────────────────
-
-class SignInPollWorker(QObject):
-    """Phase 2 only – poll Microsoft after user sees the device code."""
-    finished = pyqtSignal(bool, str)
-    log_msg  = pyqtSignal(str)
-
-    def __init__(self, auth: SharePointAuth, flow: dict):
-        super().__init__()
-        self.auth = auth
-        self.flow = flow
-
-    def run(self):
-        try:
-            self.log_msg.emit("Waiting for you to complete sign-in in the browser...")
-            self.auth.finish_device_flow(self.flow)
-            self.finished.emit(True, self.auth.username)
-        except Exception as exc:
-            self.finished.emit(False, str(exc))
-
 
 class DownloadWorker(QObject):
     progress = pyqtSignal(int, int)
@@ -463,7 +463,6 @@ class MainWindow(QMainWindow):
         self._auth = SharePointAuth()
         self._worker: DownloadWorker | None = None
         self._thread: QThread | None = None
-        self._signin_thread: QThread | None = None
         self._setup_ui()
 
     def _setup_ui(self):
@@ -500,10 +499,19 @@ class MainWindow(QMainWindow):
 
         row_tenant = QHBoxLayout()
         self.tenant_edit = QLineEdit("organizations")
-        self.tenant_edit.setPlaceholderText("organizations  or  yourcompany.onmicrosoft.com")
+        self.tenant_edit.setPlaceholderText("e.g. shlgroup.onmicrosoft.com")
         row_tenant.addWidget(QLabel("Tenant:"))
         row_tenant.addWidget(self.tenant_edit)
         l2v.addLayout(row_tenant)
+
+        row_client = QHBoxLayout()
+        self.client_id_edit = QLineEdit()
+        self.client_id_edit.setPlaceholderText(
+            "Optional – App (client) ID from IT  (leave blank to auto-try)"
+        )
+        row_client.addWidget(QLabel("Client ID:"))
+        row_client.addWidget(self.client_id_edit)
+        l2v.addLayout(row_client)
 
         row_signin = QHBoxLayout()
         self.btn_signin = QPushButton("Sign in with Microsoft")
@@ -569,7 +577,7 @@ class MainWindow(QMainWindow):
 
         self._log("Application started.")
         self._log("Step 1: Load Excel  →  Step 2: Sign in  →  Step 3: Start Download")
-        self._log("• SharePoint: load Excel first, then click 'Sign in with Microsoft'.")
+        self._log("• Sign in opens your browser directly (no device code needed).")
         if not _OFFICE365_AVAILABLE:
             self._log("")
             self._log("⚠️  office365/msal not found. Run:")
@@ -661,22 +669,6 @@ class MainWindow(QMainWindow):
 
     # ── Sign-in ──────────────────────────────────────────────────────────────
 
-    def _show_device_code_dialog(self, uri: str, code: str):
-        self._log(f"Sign-in URL : {uri}")
-        self._log(f"Sign-in Code: {code}")
-        webbrowser.open(uri)
-        QMessageBox.information(
-            self, "Microsoft Sign-In",
-            f"<h3>Sign in with your work account</h3>"
-            f"<p>Your browser should open automatically.<br>"
-            f"If not, go to: <b>{uri}</b></p>"
-            f"<p>Enter this code:</p>"
-            f"<p style='font-size:22px; text-align:center; "
-            f"background:#f0f0f0; padding:10px;'><b>{code}</b></p>"
-            f"<p>Complete MFA in the browser, then click <b>OK</b> here.<br>"
-            f"The app will wait for confirmation.</p>",
-        )
-
     def _reset_signin_ui(self):
         self.btn_signin.setEnabled(True)
         self.btn_signin.setText("Sign in with Microsoft")
@@ -694,15 +686,23 @@ class MainWindow(QMainWindow):
         self._auth._app     = None
         self._auth._account = None
 
+        client_ids: list[str] = []
+        custom = self.client_id_edit.text().strip()
+        if custom:
+            client_ids.append(custom)
+        client_ids.extend(_MS_CLIENT_IDS)
+
         self.btn_signin.setEnabled(False)
         self.btn_signin.setText("Signing in...")
-        self.signin_status.setText("Connecting to Microsoft...")
+        self.signin_status.setText("Opening browser...")
         self.signin_status.setStyleSheet("color: #e67e22;")
         QApplication.processEvents()
 
-        self._log(f"Requesting sign-in code for {sp_host} ...")
+        self._log(f"Opening browser for sign-in ({sp_host}) ...")
+        self._log("Complete login + MFA in the browser window.")
+
         try:
-            flow = self._auth.start_device_flow(sp_host)
+            self._auth.sign_in_interactive(sp_host, client_ids)
         except Exception as exc:
             self._reset_signin_ui()
             self.signin_status.setText("Sign-in failed")
@@ -711,41 +711,11 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Sign-In Failed", str(exc))
             return
 
-        # Silent re-use – already signed in
-        if flow.get("_silent"):
-            self._reset_signin_ui()
-            self.signin_status.setText(f"Signed in as {self._auth.username}")
-            self.signin_status.setStyleSheet("color: #27ae60; font-weight: bold;")
-            self._log(f"✔ Re-using session: {self._auth.username}")
-            return
-
-        # Phase 1 done – show code on UI thread, open browser
-        uri  = flow.get("verification_uri", "https://microsoft.com/devicelogin")
-        code = flow.get("user_code", "")
-        self.signin_status.setText("Enter code in browser...")
-        self._show_device_code_dialog(uri, code)
-
-        # Phase 2 – poll in background (can take 1-3 min)
-        self.signin_status.setText("Waiting for browser...")
-        self._signin_thread = QThread()
-        worker = SignInPollWorker(self._auth, flow)
-        worker.moveToThread(self._signin_thread)
-        self._signin_thread.started.connect(worker.run)
-        worker.log_msg.connect(self._log)
-        worker.finished.connect(self._on_signin_done)
-        worker.finished.connect(self._signin_thread.quit)
-        self._signin_thread.start()
-
-    def _on_signin_done(self, success: bool, message: str):
         self._reset_signin_ui()
-        if success:
-            self.signin_status.setText(f"Signed in as {message}")
-            self.signin_status.setStyleSheet("color: #27ae60; font-weight: bold;")
-        else:
-            self.signin_status.setText("Sign-in failed")
-            self.signin_status.setStyleSheet("color: #e74c3c;")
-            self._log(f"✘ Sign-in error: {message}")
-            QMessageBox.critical(self, "Sign-In Failed", message)
+        mode = "Graph API" if self._auth.use_graph else "SharePoint REST"
+        self.signin_status.setText(f"Signed in as {self._auth.username}")
+        self.signin_status.setStyleSheet("color: #27ae60; font-weight: bold;")
+        self._log(f"✔ Signed in as {self._auth.username}  (via {mode})")
 
     # ── Download ───────────────────────────────────────────────────────────────
 
