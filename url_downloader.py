@@ -19,7 +19,8 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QLineEdit, QFileDialog, QTableWidget,
     QTableWidgetItem, QProgressBar, QTextEdit, QSplitter,
-    QHeaderView, QMessageBox, QAbstractItemView, QGroupBox,
+    QHeaderView, QMessageBox, QAbstractItemView, QGroupBox, QDialog,
+    QDialogButtonBox,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QObject
 from PyQt5.QtGui import QColor, QFont
@@ -100,10 +101,11 @@ class SharePointAuth:
             )
         return self._app
 
-    def device_sign_in(self, sharepoint_url: str, log) -> None:
+    def device_sign_in(self, sharepoint_host: str, log, on_device_code=None) -> None:
         """
-        Run device-code flow.  `log` is a callable(str) for UI messages.
-        Blocks until the user completes sign-in in the browser.
+        Run device-code flow.
+        sharepoint_host: e.g. 'shlgroup.sharepoint.com' (NOT login.microsoftonline.com)
+        on_device_code: optional callback(uri, code, message) to show a popup on the UI thread
         """
         if not _ensure_office365():
             raise RuntimeError(
@@ -111,11 +113,13 @@ class SharePointAuth:
                 "  pip install Office365-REST-Python-Client msal"
             )
 
-        host   = self._host_from_url(sharepoint_url)
+        host   = sharepoint_host.lower().strip()
+        if not host.endswith(".sharepoint.com"):
+            raise ValueError(f"Invalid SharePoint host: {host}")
+
         scopes = self._scopes_for(host)
         app    = self._get_app()
 
-        # Re-use existing session if possible
         accounts = app.get_accounts()
         if accounts:
             result = app.acquire_token_silent(scopes, account=accounts[0])
@@ -125,16 +129,25 @@ class SharePointAuth:
                 log(f"✔ Re-using cached session for {self._username}")
                 return
 
+        log("Requesting device code from Microsoft...")
         flow = app.initiate_device_flow(scopes=scopes)
         if "user_code" not in flow:
             raise RuntimeError(f"Device flow failed: {flow}")
 
+        uri  = flow.get("verification_uri", "https://microsoft.com/devicelogin")
+        code = flow.get("user_code", "")
+        msg  = flow.get("message", "")
+
         log("")
-        log("── Microsoft Sign-In Required ──")
-        log(flow["message"])
-        log("Complete sign-in in your browser, then return here.")
+        log("── Microsoft Sign-In ──")
+        log(f"URL : {uri}")
+        log(f"Code: {code}")
         log("")
 
+        if on_device_code:
+            on_device_code(uri, code, msg)
+
+        log("Waiting for browser sign-in...")
         result = app.acquire_token_by_device_flow(flow)
         if "access_token" not in result:
             desc = result.get("error_description", result.get("error", "Unknown error"))
@@ -200,6 +213,31 @@ def _tenant_hint_from_url(url: str) -> str:
     return "organizations"
 
 
+def _sharepoint_host_from_tenant(tenant: str) -> str | None:
+    """shlgroup.onmicrosoft.com → shlgroup.sharepoint.com"""
+    t = tenant.strip().lower()
+    if not t or t in ("organizations", "common", "consumers"):
+        return None
+    if t.endswith(".onmicrosoft.com"):
+        return t.replace(".onmicrosoft.com", ".sharepoint.com")
+    if ".sharepoint.com" in t:
+        return t.split("/")[0]
+    return f"{t}.sharepoint.com"
+
+
+def _sharepoint_host_for_signin(tenant: str, sample_url: str | None) -> str:
+    if sample_url and _is_sharepoint(sample_url):
+        return urlparse(sample_url).netloc.lower()
+    host = _sharepoint_host_from_tenant(tenant)
+    if host:
+        return host
+    raise ValueError(
+        "Cannot determine SharePoint host.\n"
+        "Please load your Excel file first (Step 1 → Load),\n"
+        "or set Tenant to e.g. shlgroup.onmicrosoft.com"
+    )
+
+
 def _download_sharepoint_file(url: str, dest_path: str, auth: SharePointAuth) -> None:
     from office365.sharepoint.client_context import ClientContext
 
@@ -244,19 +282,24 @@ def _validate_download(path: str) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class SignInWorker(QObject):
-    finished = pyqtSignal(bool, str)   # (success, message)
-    log_msg  = pyqtSignal(str)
+    finished     = pyqtSignal(bool, str)   # (success, message)
+    log_msg      = pyqtSignal(str)
+    device_code  = pyqtSignal(str, str, str)  # (uri, code, message)
 
-    def __init__(self, auth: SharePointAuth, sample_url: str):
+    def __init__(self, auth: SharePointAuth, sp_host: str):
         super().__init__()
-        self.auth        = auth
-        self.sample_url  = sample_url
+        self.auth    = auth
+        self.sp_host = sp_host
 
     def run(self):
         try:
+            def show_code(uri, code, msg):
+                self.device_code.emit(uri, code, msg)
+
             self.auth.device_sign_in(
-                self.sample_url,
+                self.sp_host,
                 log=lambda m: self.log_msg.emit(m),
+                on_device_code=show_code,
             )
             self.finished.emit(True, self.auth.username)
         except Exception as exc:
@@ -500,8 +543,8 @@ class MainWindow(QMainWindow):
         root.addLayout(btn_row)
 
         self._log("Application started.")
-        self._log("• SharePoint URLs → click 'Sign in with Microsoft' in Step 2 first.")
-        self._log("• Regular HTTP(S) URLs → Step 2 can be skipped.")
+        self._log("Step 1: Load Excel  →  Step 2: Sign in  →  Step 3: Start Download")
+        self._log("• SharePoint: load Excel first, then click 'Sign in with Microsoft'.")
         if not _OFFICE365_AVAILABLE:
             self._log("")
             self._log("⚠️  office365/msal not found. Run:")
@@ -586,27 +629,68 @@ class MainWindow(QMainWindow):
 
     def _first_sharepoint_url(self) -> str | None:
         for r in self._collect_rows():
-            if _is_sharepoint(r["url"]):
-                return r["url"]
+            url = r["url"].strip()
+            if url and url.lower() not in ("nan", "none") and _is_sharepoint(url):
+                return url
         return None
 
     # ── Sign-in ──────────────────────────────────────────────────────────────
 
-    def _sign_in(self):
-        sp_url = self._first_sharepoint_url()
-        if not sp_url:
-            sp_url = "https://login.microsoftonline.com"
-            self._log("No SharePoint URL in list – using generic sign-in.")
+    def _show_device_code_dialog(self, uri: str, code: str, message: str):
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Microsoft Sign-In")
+        dlg.setMinimumWidth(480)
+        layout = QVBoxLayout(dlg)
 
-        self._auth._tenant = self.tenant_edit.text().strip() or "organizations"
+        layout.addWidget(QLabel(
+            "<b>Complete these steps in your browser:</b>"
+        ))
+        layout.addWidget(QLabel(f"1. Open:  <a href='{uri}'>{uri}</a>"))
+        layout.addWidget(QLabel("2. Enter this code:"))
+
+        code_label = QLabel(code)
+        code_label.setAlignment(Qt.AlignCenter)
+        code_label.setStyleSheet(
+            "font-size: 28px; font-weight: bold; letter-spacing: 4px;"
+            "background: #f0f0f0; padding: 12px; border-radius: 6px;"
+        )
+        layout.addWidget(code_label)
+        layout.addWidget(QLabel(
+            "3. Sign in with your <b>work account</b> and complete MFA.\n"
+            "4. Click OK below, then wait – the app is polling for confirmation."
+        ))
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok)
+        buttons.accepted.connect(dlg.accept)
+        layout.addWidget(buttons)
+        dlg.exec_()
+
+    def _sign_in(self):
+        try:
+            sp_url  = self._first_sharepoint_url()
+            tenant  = self.tenant_edit.text().strip() or "organizations"
+            sp_host = _sharepoint_host_for_signin(tenant, sp_url)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Cannot Sign In", str(exc))
+            return
+
+        self._auth._tenant = tenant
+        self._auth._app    = None          # rebuild MSAL app for new tenant
+
         self.btn_signin.setEnabled(False)
         self.btn_signin.setText("Signing in...")
+        self.signin_status.setText("Waiting for browser...")
+        self.signin_status.setStyleSheet("color: #e67e22;")
+        self._log(f"Starting sign-in for {sp_host} ...")
 
         self._signin_thread = QThread()
-        worker = SignInWorker(self._auth, sp_url)
+        worker = SignInWorker(self._auth, sp_host)
         worker.moveToThread(self._signin_thread)
         self._signin_thread.started.connect(worker.run)
         worker.log_msg.connect(self._log)
+        worker.device_code.connect(
+            self._show_device_code_dialog, Qt.BlockingQueuedConnection
+        )
         worker.finished.connect(self._on_signin_done)
         worker.finished.connect(self._signin_thread.quit)
         self._signin_thread.start()
